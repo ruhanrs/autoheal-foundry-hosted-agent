@@ -27,19 +27,19 @@ environment_variables:
   - name: GITHUB_MCP_CONNECTION_ID
     value: ${GITHUB_MCP_CONNECTION_ID}
   - name: GITHUB_MCP_SERVER_LABEL
-    value: ${GITHUB_MCP_SERVER_LABEL:-github}
+    value: ${GITHUB_MCP_SERVER_LABEL}
   - name: GITHUB_MCP_REQUIRE_APPROVAL
-    value: ${GITHUB_MCP_REQUIRE_APPROVAL:-never}
+    value: ${GITHUB_MCP_REQUIRE_APPROVAL}
   - name: GITHUB_MCP_ALLOWED_TOOLS_JSON
-    value: ${GITHUB_MCP_ALLOWED_TOOLS_JSON:-[]}
+    value: ${GITHUB_MCP_ALLOWED_TOOLS_JSON}
   - name: PHASE1_TIMEOUT_SECONDS
-    value: ${PHASE1_TIMEOUT_SECONDS:-120}
+    value: ${PHASE1_TIMEOUT_SECONDS}
   - name: PHASE2_TIMEOUT_SECONDS
-    value: ${PHASE2_TIMEOUT_SECONDS:-180}
+    value: ${PHASE2_TIMEOUT_SECONDS}
   - name: AGENT_MAX_RETRIES
-    value: ${AGENT_MAX_RETRIES:-2}
+    value: ${AGENT_MAX_RETRIES}
   - name: LOG_LEVEL
-    value: ${LOG_LEVEL:-INFO}
+    value: ${LOG_LEVEL}
 resources:
   cpu: '1.0'
   memory: 2.0Gi

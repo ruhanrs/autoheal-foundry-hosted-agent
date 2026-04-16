@@ -34,8 +34,8 @@ from dotenv import load_dotenv
 
 load_dotenv(override=False)
 
-from agent_framework import AgentRunResponse, AgentRunResponseUpdate, BaseAgent, ChatMessage
-from agent_framework.azure import AzureAIClient
+from agent_framework import AgentResponse, AgentResponseUpdate, BaseAgent, ChatMessage
+from agent_framework.azure import AzureAIAgentClient
 from azure.ai.agentserver.agentframework import from_agent_framework
 
 from autoheal.github import create_repository_client
@@ -144,7 +144,7 @@ async def _run_autoheal_pipeline(raw_input: str) -> str:
     try:
         async with (
             DefaultAzureCredential() as credential,
-            AzureAIClient(
+            AzureAIAgentClient(
                 project_endpoint=endpoint,
                 model_deployment_name=model,
                 credential=credential,
@@ -230,7 +230,7 @@ class AutoHealHostedAgent(BaseAgent):
             description="Diagnoses CI/CD failures and creates GitHub remediation PRs.",
         )
 
-    async def run(self, messages=None, *, thread=None, **kwargs) -> AgentRunResponse:
+    async def run(self, messages=None, *, thread=None, **kwargs) -> AgentResponse:
         raw_input = _extract_input_text(messages)
         if not raw_input:
             text = "No pipeline failure input was provided."
@@ -238,16 +238,16 @@ class AutoHealHostedAgent(BaseAgent):
             text = await _run_autoheal_pipeline(raw_input)
 
         response_id = f"autoheal-{uuid.uuid4()}"
-        return AgentRunResponse(
+        return AgentResponse(
             messages=[ChatMessage(role="assistant", text=text)],
             response_id=response_id,
         )
 
-    def run_stream(self, messages=None, *, thread=None, **kwargs) -> AsyncIterable[AgentRunResponseUpdate]:
-        async def _stream() -> AsyncIterable[AgentRunResponseUpdate]:
+    def run_stream(self, messages=None, *, thread=None, **kwargs) -> AsyncIterable[AgentResponseUpdate]:
+        async def _stream() -> AsyncIterable[AgentResponseUpdate]:
             response = await self.run(messages=messages, thread=thread, **kwargs)
             response_text = _extract_input_text(getattr(response, "messages", None))
-            yield AgentRunResponseUpdate(
+            yield AgentResponseUpdate(
                 role="assistant",
                 text=response_text,
                 response_id=response.response_id,

@@ -1,8 +1,8 @@
 # Azure AI AgentServer / Agent Framework (pinned — beta, breaking changes expected between releases)
 agent-framework-azure-ai==1.0.0rc3
 agent-framework-core==1.0.0rc3
-azure-ai-agentserver-agentframework==1.0.0b16
-azure-ai-agentserver-core==1.0.0b16
+azure-ai-agentserver-agentframework==1.0.0b17
+azure-ai-agentserver-core==1.0.0b17
 
 # Azure Identity — upper-bound at major version to prevent breaking changes
 azure-identity>=1.16.0,<2.0.0
