@@ -1,0 +1,6 @@
+langgraph>=0.2,<0.4
+langchain-core>=0.3,<0.4
+openai>=1.40.0,<2.0.0
+azure-ai-agentserver-langgraph>=1.0.0b1,<2.0.0
+azure-ai-projects>=2.0.0,<3.0.0
+mcp>=1.0.0,<2.0.0

@@ -78,6 +78,32 @@ python3 main.py
 
 The project loads variables from `.env` if present.
 
+## GitHub MCP mode
+
+The current `autoheal` hosted-agent path uses the Foundry-managed GitHub MCP
+tool runtime for all repository operations.
+
+Required:
+
+- `GITHUB_MCP_CONNECTION_ID`: Foundry project connection ID for the GitHub MCP tool
+
+Optional:
+
+- `GITHUB_MCP_SERVER_LABEL`: defaults to `github`
+- `GITHUB_MCP_REQUIRE_APPROVAL`: defaults to `never`
+- `GITHUB_MCP_ALLOWED_TOOLS_JSON`: JSON array of allowed MCP tool names
+
+This path no longer requires GitHub App credentials or app-managed MCP headers.
+
+Enable it with:
+
+- `USE_GITHUB_MCP=true`
+- either `GITHUB_MCP_URL` for a streamable HTTP MCP endpoint
+- or `GITHUB_MCP_COMMAND` plus optional `GITHUB_MCP_ARGS_JSON`,
+  `GITHUB_MCP_ENV_JSON`, and `GITHUB_MCP_HEADERS_JSON`
+
+When MCP mode is disabled, the app falls back to direct GitHub App API calls.
+
 ## Notes on behavior
 
 - Phase 1 supports multiple failing files and stores them in structured JSON.

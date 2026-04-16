@@ -15,3 +15,6 @@ PyJWT[crypto]>=2.8.0,<3.0.0
 
 # .env loading — 1.x is stable
 python-dotenv>=1.0.0,<2.0.0
+
+# MCP client SDK for true MCP-based GitHub operations
+mcp>=1.0.0,<2.0.0

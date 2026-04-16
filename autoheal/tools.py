@@ -12,14 +12,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from pathlib import PurePosixPath
 from typing import Annotated
 
 from agent_framework import tool
 
-from .github import GitHubClient, GitHubError
+from .github import GitHubError, RepositoryClient
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +88,7 @@ def _build_context_block(
     )
 
 
-def create_context_tools(github: GitHubClient, context_container: list) -> list:
+def create_context_tools(github: RepositoryClient, context_container: list) -> list:
     """Tools for Phase 1. gather_context writes into context_container[0]."""
 
     @tool
@@ -200,7 +199,7 @@ def create_context_tools(github: GitHubClient, context_container: list) -> list:
     return [gather_context]
 
 
-def create_apply_tools(github: GitHubClient, result_container: list) -> list:
+def create_apply_tools(github: RepositoryClient, result_container: list, context_raw: str) -> list:
     """Tools for Phase 2. apply_fixes writes into result_container[0]."""
 
     @tool
@@ -214,14 +213,10 @@ def create_apply_tools(github: GitHubClient, result_container: list) -> list:
         if fixes_err:
             return f"ERROR: {fixes_err}"
 
-        context_raw = os.environ.get("AUTOHEAL_PHASE2_CONTEXT")
-        if not context_raw:
-            return "ERROR: AUTOHEAL_PHASE2_CONTEXT is missing."
-
         try:
             context = json.loads(context_raw)
         except json.JSONDecodeError as exc:
-            return f"ERROR: AUTOHEAL_PHASE2_CONTEXT is invalid JSON: {exc}"
+            return f"ERROR: Phase 2 context is invalid JSON: {exc}"
 
         source_branch = str(context.get("source_branch", ""))
         autoheal_branch = str(context.get("autoheal_branch", ""))
@@ -265,8 +260,7 @@ def create_apply_tools(github: GitHubClient, result_container: list) -> list:
             if not await github.branch_exists(source_branch):
                 return f"ERROR: Source branch '{source_branch}' does not exist."
             if not await github.branch_exists(autoheal_branch):
-                sha = await github.get_branch_sha(source_branch)
-                new_sha = await github.create_branch(autoheal_branch, sha)
+                new_sha = await github.create_branch(autoheal_branch, source_branch)
                 logger.info("[Phase 2] Created '%s' at SHA %s.", autoheal_branch, new_sha[:8])
             else:
                 logger.info("[Phase 2] Reusing existing branch '%s'.", autoheal_branch)

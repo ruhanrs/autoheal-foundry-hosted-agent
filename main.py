@@ -35,7 +35,7 @@ load_dotenv(override=False)
 from agent_framework.azure import AzureAIClient
 from azure.ai.agentserver.agentframework import from_agent_framework
 
-from autoheal.github import GitHubClient
+from autoheal.github import create_repository_client
 from autoheal.instructions import APPLY_FIX_TEMPLATE, CONTEXT_GATHER_INSTRUCTIONS
 from autoheal.tools import create_apply_tools, create_context_tools
 
@@ -70,11 +70,9 @@ logger = logging.getLogger(__name__)
 
 _REQUIRED_ENV_VARS = [
     "FOUNDRY_PROJECT_ENDPOINT",
-    "GITHUB_APP_ID",
-    "GITHUB_APP_INSTALLATION_ID",
-    "GITHUB_APP_PRIVATE_KEY",
     "GITHUB_REPO_OWNER",
     "GITHUB_REPO_NAME",
+    "GITHUB_MCP_CONNECTION_ID",
 ]
 
 
@@ -128,7 +126,7 @@ async def _run_phase(runner, phase_name: str, timeout: int) -> str | None:
 async def main() -> None:
     _validate_env()
 
-    github = GitHubClient()
+    github = create_repository_client()
     credential = DefaultAzureCredential()
     model = os.environ.get("FOUNDRY_MODEL_DEPLOYMENT_NAME", "gpt-4.1")
     endpoint = os.environ["FOUNDRY_PROJECT_ENDPOINT"]
@@ -176,7 +174,6 @@ async def main() -> None:
                 return
 
         context_block = context_container[0]
-        os.environ["AUTOHEAL_PHASE2_CONTEXT"] = context_block
 
         # ── Phase 2: Fix Application ──────────────────────────────────────────
         # Goal: read the pre-fetched JSON context from system instructions,
@@ -188,7 +185,7 @@ async def main() -> None:
         for attempt in range(1, MAX_RETRIES + 2):
             logger.info("=== Phase 2 attempt %d/%d ===", attempt, MAX_RETRIES + 1)
             result_container: list[str] = []
-            apply_tools = create_apply_tools(github, result_container)
+            apply_tools = create_apply_tools(github, result_container, context_block)
 
             async with AzureAIClient(
                 project_endpoint=endpoint,
