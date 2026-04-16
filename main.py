@@ -141,15 +141,15 @@ async def _run_autoheal_pipeline(raw_input: str) -> str:
 
     final_result = "Automatic fix could not be safely determined."
 
+    credential = DefaultAzureCredential()
+    ai_client = AzureAIAgentClient(
+        project_endpoint=endpoint,
+        model_deployment_name=model,
+        credential=credential,
+    )
+
     try:
-        async with (
-            DefaultAzureCredential() as credential,
-            AzureAIAgentClient(
-                project_endpoint=endpoint,
-                model_deployment_name=model,
-                credential=credential,
-            ) as ai_client,
-        ):
+        async with ai_client:
             for attempt in range(1, MAX_RETRIES + 2):
                 logger.info("=== Phase 1 attempt %d/%d ===", attempt, MAX_RETRIES + 1)
                 context_container: list[str] = []
@@ -211,8 +211,8 @@ async def _run_autoheal_pipeline(raw_input: str) -> str:
                 if attempt > MAX_RETRIES:
                     logger.error("Phase 2 failed after all retries.")
                     break
-
     finally:
+        await credential.close()
         await github.close()
 
     logger.info(
