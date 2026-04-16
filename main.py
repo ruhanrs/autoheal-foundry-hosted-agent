@@ -1,21 +1,10 @@
 """
-Auto-heal hosted agent entry point.
+Auto-heal hosted agent — single-tool pipeline entry point.
 
-This module exposes a proper Foundry hosted-agent HTTP server. Incoming user
-input is handled by a lightweight top-level agent, which then runs the existing
-two-phase auto-heal pipeline inside the request:
-
-Phase 1 (Context Gatherer)
-  The model parses the failure input and invokes `gather_context` once.
-
-Phase 2 (Fix Applier)
-  The model reads the captured context and invokes `apply_fixes` once.
-
-Why two phases?
-  azure-ai-agentserver-agentframework 1.0.0b16 executes exactly one model turn
-  per run call and does not continue after tool outputs. Splitting the workflow
-  into two focused model runs keeps the MCP-backed GitHub interactions wrapped
-  inside single high-leverage tools.
+The outer model has exactly one tool, `run_autoheal_pipeline`, which performs
+every GitHub read, fix generation, and GitHub write inside Python. This keeps
+the workflow inside a single model turn, matching the hosted-agent runtime's
+one-turn-per-run semantics.
 """
 
 from __future__ import annotations
@@ -24,23 +13,21 @@ import asyncio
 import logging
 import logging.config
 import os
+import signal
 import sys
 import time
-import uuid
-from typing import Any, AsyncIterable
 
 from azure.identity.aio import DefaultAzureCredential
 from dotenv import load_dotenv
 
 load_dotenv(override=False)
 
-from agent_framework import AgentResponse, AgentResponseUpdate, BaseAgent, ChatMessage
 from agent_framework.azure import AzureAIAgentClient
 from azure.ai.agentserver.agentframework import from_agent_framework
 
 from autoheal.github import create_repository_client
-from autoheal.instructions import APPLY_FIX_TEMPLATE, CONTEXT_GATHER_INSTRUCTIONS
-from autoheal.tools import create_apply_tools, create_context_tools
+from autoheal.instructions import PIPELINE_INSTRUCTIONS
+from autoheal.tools import create_pipeline_tool
 
 
 def _configure_logging() -> None:
@@ -84,46 +71,28 @@ def _validate_env() -> None:
     logger.info("Environment validation passed.")
 
 
-PHASE1_TIMEOUT = int(os.getenv("PHASE1_TIMEOUT_SECONDS", "120"))
-PHASE2_TIMEOUT = int(os.getenv("PHASE2_TIMEOUT_SECONDS", "180"))
-MAX_RETRIES = int(os.getenv("AGENT_MAX_RETRIES", "2"))
+AGENT_TIMEOUT = int(os.getenv("AGENT_TIMEOUT_SECONDS") or "240")
+MAX_RETRIES = int(os.getenv("AGENT_MAX_RETRIES") or "2")
 
 
-def _extract_input_text(messages: Any) -> str:
-    def _collect(value: Any) -> list[str]:
-        if value is None:
-            return []
-        if isinstance(value, str):
-            text = value.strip()
-            return [text] if text else []
-        if isinstance(value, ChatMessage):
-            text = (value.text or "").strip()
-            if text:
-                return [text]
-            return _collect(getattr(value, "contents", None))
-        if isinstance(value, list):
-            parts: list[str] = []
-            for item in value:
-                parts.extend(_collect(item))
-            return parts
-        if isinstance(value, dict):
-            parts: list[str] = []
-            for key in ("input", "text", "content", "contents", "messages"):
-                if key in value:
-                    parts.extend(_collect(value.get(key)))
-            if parts:
-                return parts
-        text = str(value).strip()
-        return [text] if text else []
+def _install_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
+    def _handle(sig: signal.Signals) -> None:
+        logger.info("Received %s — shutting down.", sig.name)
+        loop.stop()
 
-    return "\n".join(_collect(messages))
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, _handle, sig)
+        except NotImplementedError:
+            # add_signal_handler is POSIX-only; skip on platforms that lack it.
+            pass
 
 
-async def _run_phase(phase_coro, phase_name: str, timeout: int) -> Any:
+async def _run_phase(runner, phase_name: str, timeout: int):
     start = time.monotonic()
     logger.info("%s starting (timeout=%ds).", phase_name, timeout)
     try:
-        result = await asyncio.wait_for(phase_coro, timeout=timeout)
+        result = await asyncio.wait_for(runner.run_async(), timeout=timeout)
         logger.info("%s completed in %.2fs.", phase_name, time.monotonic() - start)
         return result
     except asyncio.TimeoutError:
@@ -134,129 +103,63 @@ async def _run_phase(phase_coro, phase_name: str, timeout: int) -> Any:
         return None
 
 
-async def _run_autoheal_pipeline(raw_input: str) -> str:
+async def main() -> None:
+    _validate_env()
+
     github = create_repository_client()
+    credential = DefaultAzureCredential()
     model = os.environ.get("FOUNDRY_MODEL_DEPLOYMENT_NAME", "gpt-4.1")
     endpoint = os.environ["FOUNDRY_PROJECT_ENDPOINT"]
 
     final_result = "Automatic fix could not be safely determined."
 
-    credential = DefaultAzureCredential()
-    ai_client = AzureAIAgentClient(
-        project_endpoint=endpoint,
-        model_deployment_name=model,
-        credential=credential,
-    )
-
     try:
-        async with ai_client:
-            for attempt in range(1, MAX_RETRIES + 2):
-                logger.info("=== Phase 1 attempt %d/%d ===", attempt, MAX_RETRIES + 1)
-                context_container: list[str] = []
-                context_tools = create_context_tools(github, context_container)
+        for attempt in range(1, MAX_RETRIES + 2):
+            logger.info("=== Pipeline attempt %d/%d ===", attempt, MAX_RETRIES + 1)
+            result_container: list[str] = []
 
-                async with ai_client.as_agent(
-                    name="context-gatherer",
-                    instructions=CONTEXT_GATHER_INSTRUCTIONS,
-                    tools=context_tools,
-                ) as phase1_agent:
-                    phase1_result = await _run_phase(
-                        phase1_agent.run(raw_input),
-                        "Phase 1 (context)",
-                        PHASE1_TIMEOUT,
-                    )
+            ai_client = AzureAIAgentClient(
+                project_endpoint=endpoint,
+                model_deployment_name=model,
+                credential=credential,
+            )
+            tools = create_pipeline_tool(github, ai_client, result_container)
 
-                if context_container:
-                    logger.info("Phase 1 succeeded — context captured.")
-                    break
+            async with ai_client.as_agent(
+                name="auto-heal-agent",
+                instructions=PIPELINE_INSTRUCTIONS,
+                tools=tools,
+            ) as agent:
+                runner = from_agent_framework(agent)
+                await _run_phase(runner, "auto-heal pipeline", AGENT_TIMEOUT)
 
-                logger.warning(
-                    "Phase 1 produced no context (attempt %d). Agent result=%r",
-                    attempt,
-                    phase1_result,
-                )
-                if attempt > MAX_RETRIES:
-                    logger.error("Phase 1 failed after all retries. Aborting.")
-                    return final_result
+            if result_container:
+                final_result = result_container[0]
+                logger.info("Pipeline succeeded — result captured.")
+                break
 
-            context_block = context_container[0]
-            apply_instructions = APPLY_FIX_TEMPLATE.format(context=context_block)
+            logger.warning("Pipeline produced no result (attempt %d).", attempt)
+            if attempt > MAX_RETRIES:
+                logger.error("Pipeline failed after all retries.")
+                break
 
-            for attempt in range(1, MAX_RETRIES + 2):
-                logger.info("=== Phase 2 attempt %d/%d ===", attempt, MAX_RETRIES + 1)
-                result_container: list[str] = []
-                apply_tools = create_apply_tools(github, result_container, context_block)
-
-                async with ai_client.as_agent(
-                    name="fix-applier",
-                    instructions=apply_instructions,
-                    tools=apply_tools,
-                ) as phase2_agent:
-                    phase2_result = await _run_phase(
-                        phase2_agent.run("Analyze the provided context and call apply_fixes."),
-                        "Phase 2 (apply)",
-                        PHASE2_TIMEOUT,
-                    )
-
-                if result_container:
-                    final_result = result_container[0]
-                    logger.info("Phase 2 succeeded — result captured.")
-                    break
-
-                logger.warning(
-                    "Phase 2 produced no result (attempt %d). Agent result=%r",
-                    attempt,
-                    phase2_result,
-                )
-                if attempt > MAX_RETRIES:
-                    logger.error("Phase 2 failed after all retries.")
-                    break
     finally:
-        await credential.close()
         await github.close()
+        await credential.close()
 
     logger.info(
         "FINAL RESPONSE:\n%s\n%s\n%s", "=" * 44, final_result, "=" * 44
     )
-    return final_result
-
-
-class AutoHealHostedAgent(BaseAgent):
-    """Top-level hosted agent that runs the auto-heal pipeline per request."""
-
-    def __init__(self) -> None:
-        super().__init__(
-            name="auto-heal-agent",
-            description="Diagnoses CI/CD failures and creates GitHub remediation PRs.",
-        )
-
-    async def run(self, messages=None, *, thread=None, **kwargs) -> AgentResponse:
-        raw_input = _extract_input_text(messages)
-        if not raw_input:
-            text = "No pipeline failure input was provided."
-        else:
-            text = await _run_autoheal_pipeline(raw_input)
-
-        response_id = f"autoheal-{uuid.uuid4()}"
-        return AgentResponse(
-            messages=[ChatMessage(role="assistant", text=text)],
-            response_id=response_id,
-        )
-
-    def run_stream(self, messages=None, *, thread=None, **kwargs) -> AsyncIterable[AgentResponseUpdate]:
-        async def _stream() -> AsyncIterable[AgentResponseUpdate]:
-            response = await self.run(messages=messages, thread=thread, **kwargs)
-            response_text = _extract_input_text(getattr(response, "messages", None))
-            yield AgentResponseUpdate(
-                role="assistant",
-                text=response_text,
-                response_id=response.response_id,
-            )
-
-        return _stream()
 
 
 if __name__ == "__main__":
-    _validate_env()
-    hosted_agent = AutoHealHostedAgent()
-    from_agent_framework(hosted_agent).run()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    _install_signal_handlers(loop)
+    try:
+        loop.run_until_complete(main())
+    except Exception:
+        logger.exception("Unhandled exception in main.")
+        sys.exit(1)
+    finally:
+        loop.close()
