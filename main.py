@@ -1,4 +1,21 @@
-"""Auto-heal hosted agent entry point."""
+"""
+Auto-heal hosted agent — two-phase pipeline entry point.
+
+Phase 1 (Context Gatherer)
+  Agent is given one read-only tool: gather_context. The model only needs to
+  parse the input and invoke that tool once.
+
+Phase 2 (Fix Applier)
+  Agent is given one write-only tool: apply_fixes. The Phase 1 context is
+  injected into the system prompt, and the tool performs the branch, commit,
+  PR, and final result operations in Python.
+
+Why two phases?
+  azure-ai-agentserver-agentframework 1.0.0b16 executes exactly one model turn
+  per run_async() call and does not feed tool results back for a continuation
+  turn. Each phase therefore exposes a single high-leverage tool so the
+  workflow no longer depends on multi-step tool chaining in one turn.
+"""
 
 from __future__ import annotations
 
@@ -19,8 +36,8 @@ from agent_framework.azure import AzureAIClient
 from azure.ai.agentserver.agentframework import from_agent_framework
 
 from autoheal.github import GitHubClient
-from autoheal.instructions import SYSTEM_INSTRUCTIONS
-from autoheal.tools import create_tools
+from autoheal.instructions import APPLY_FIX_TEMPLATE, CONTEXT_GATHER_INSTRUCTIONS
+from autoheal.tools import create_apply_tools, create_context_tools
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -45,6 +62,7 @@ def _configure_logging() -> None:
         "root": {"level": log_level, "handlers": ["stdout"]},
     })
 
+
 _configure_logging()
 logger = logging.getLogger(__name__)
 
@@ -59,6 +77,7 @@ _REQUIRED_ENV_VARS = [
     "GITHUB_REPO_NAME",
 ]
 
+
 def _validate_env() -> None:
     missing = [v for v in _REQUIRED_ENV_VARS if not os.environ.get(v)]
     if missing:
@@ -66,9 +85,13 @@ def _validate_env() -> None:
         sys.exit(1)
     logger.info("Environment validation passed.")
 
+
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-AGENT_TIMEOUT_SECONDS = int(os.getenv("AGENT_TIMEOUT_SECONDS", "300"))
+# Phase 1 only needs to make 2-3 read calls — 120 s is generous.
+PHASE1_TIMEOUT = int(os.getenv("PHASE1_TIMEOUT_SECONDS", "120"))
+# Phase 2 needs to write a file, create a branch, and open a PR — 180 s.
+PHASE2_TIMEOUT = int(os.getenv("PHASE2_TIMEOUT_SECONDS", "180"))
 MAX_RETRIES = int(os.getenv("AGENT_MAX_RETRIES", "2"))
 
 # ── Graceful shutdown ──────────────────────────────────────────────────────────
@@ -81,102 +104,130 @@ def _install_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, _handle, sig)
 
-# ── Agent execution ────────────────────────────────────────────────────────────
 
-async def run_agent_once(runner) -> str | None:
+# ── Phase runner ───────────────────────────────────────────────────────────────
+
+async def _run_phase(runner, phase_name: str, timeout: int) -> str | None:
+    """Execute one agent phase with timeout protection."""
     start = time.monotonic()
+    logger.info("%s starting (timeout=%ds).", phase_name, timeout)
     try:
-        logger.info("Starting agent execution (timeout=%ds).", AGENT_TIMEOUT_SECONDS)
-        result = await asyncio.wait_for(runner.run_async(), timeout=AGENT_TIMEOUT_SECONDS)
-        logger.info("Agent completed in %.2fs.", time.monotonic() - start)
+        result = await asyncio.wait_for(runner.run_async(), timeout=timeout)
+        logger.info("%s completed in %.2fs.", phase_name, time.monotonic() - start)
         return result
     except asyncio.TimeoutError:
-        logger.error("Agent timed out after %.2fs.", time.monotonic() - start)
+        logger.error("%s timed out after %.2fs.", phase_name, time.monotonic() - start)
         return None
     except Exception:
-        logger.exception("Agent execution raised an unexpected exception.")
+        logger.exception("%s raised an unexpected exception.", phase_name)
         return None
 
 
-def _extract_result(run_result: str | None, result_container: list) -> str:
-    """
-    Return the best available result, checking sources in priority order:
-
-    1. result_container  — populated when the model called report_final_result
-       (works even when run_async() returns no text, which is a known limitation
-       of azure-ai-agentserver-agentframework 1.0.0b16 where the SDK only
-       executes one model turn without feeding tool results back for continuation)
-    2. run_result text   — standard path when the SDK does return text
-    3. Fallback message  — nothing worked
-    """
-    # Priority 1: captured via report_final_result tool call
-    if result_container:
-        captured = result_container[0]
-        logger.info("Using result captured from report_final_result tool call.")
-        return captured
-
-    # Priority 2: text returned directly from run_async()
-    if run_result:
-        text = str(run_result).strip()
-        if text and "Root Cause:" in text:
-            logger.info("Using text result returned by run_async().")
-            return text
-        logger.warning("run_async() returned text but it lacks 'Root Cause:' — treating as invalid.")
-
-    return "Automatic fix could not be safely determined."
-
+# ── Main pipeline ──────────────────────────────────────────────────────────────
 
 async def main() -> None:
     _validate_env()
 
-    # Shared capture cell — report_final_result writes here, _extract_result reads here.
-    result_container: list[str] = []
-
     github = GitHubClient()
-    tools = create_tools(github, result_container)
     credential = DefaultAzureCredential()
+    model = os.environ.get("FOUNDRY_MODEL_DEPLOYMENT_NAME", "gpt-4.1")
+    endpoint = os.environ["FOUNDRY_PROJECT_ENDPOINT"]
+
+    final_result = "Automatic fix could not be safely determined."
 
     try:
-        async with AzureAIClient(
-            project_endpoint=os.environ["FOUNDRY_PROJECT_ENDPOINT"],
-            model_deployment_name=os.environ.get("FOUNDRY_MODEL_DEPLOYMENT_NAME", "gpt-4.1"),
-            credential=credential,
-        ).as_agent(
-            name="auto-heal-agent",
-            instructions=SYSTEM_INSTRUCTIONS,
-            tools=tools,
-        ) as agent:
+        # ── Phase 1: Context Gathering ────────────────────────────────────────
+        # Goal: the model parses the input and calls gather_context once.
+        # The gather_context tool writes into context_container[0].
 
-            runner = from_agent_framework(agent)
+        for attempt in range(1, MAX_RETRIES + 2):
+            logger.info("=== Phase 1 attempt %d/%d ===", attempt, MAX_RETRIES + 1)
+            context_container: list[str] = []
+            context_tools = create_context_tools(github, context_container)
 
-            attempt = 0
-            final_result: str | None = None
+            async with AzureAIClient(
+                project_endpoint=endpoint,
+                model_deployment_name=model,
+                credential=credential,
+            ).as_agent(
+                name="context-gatherer",
+                instructions=CONTEXT_GATHER_INSTRUCTIONS,
+                tools=context_tools,
+            ) as phase1_agent:
 
-            while attempt <= MAX_RETRIES:
-                attempt += 1
-                result_container.clear()   # reset capture cell for each attempt
-                logger.info("Agent attempt %d/%d", attempt, MAX_RETRIES + 1)
+                phase1_runner = from_agent_framework(phase1_agent)
+                phase1_result = await _run_phase(
+                    phase1_runner,
+                    "Phase 1 (context)",
+                    PHASE1_TIMEOUT,
+                )
 
-                run_result = await run_agent_once(runner)
-                candidate = _extract_result(run_result, result_container)
+            if context_container:
+                logger.info("Phase 1 succeeded — context captured.")
+                break
 
-                if candidate != "Automatic fix could not be safely determined.":
-                    final_result = candidate
-                    break
-
-                if attempt <= MAX_RETRIES:
-                    logger.warning("No valid result on attempt %d — retrying.", attempt)
-
-            if not final_result:
-                final_result = "Automatic fix could not be safely determined."
-
-            logger.info(
-                "FINAL RESPONSE:\n%s\n%s\n%s", "=" * 44, final_result, "=" * 44
+            logger.warning(
+                "Phase 1 produced no context (attempt %d). Runner result=%r",
+                attempt,
+                phase1_result,
             )
+            if attempt > MAX_RETRIES:
+                logger.error("Phase 1 failed after all retries. Aborting.")
+                return
+
+        context_block = context_container[0]
+        os.environ["AUTOHEAL_PHASE2_CONTEXT"] = context_block
+
+        # ── Phase 2: Fix Application ──────────────────────────────────────────
+        # Goal: read the pre-fetched JSON context from system instructions,
+        # generate the fix, and call apply_fixes once. The tool writes the
+        # final result into result_container[0].
+
+        apply_instructions = APPLY_FIX_TEMPLATE.format(context=context_block)
+
+        for attempt in range(1, MAX_RETRIES + 2):
+            logger.info("=== Phase 2 attempt %d/%d ===", attempt, MAX_RETRIES + 1)
+            result_container: list[str] = []
+            apply_tools = create_apply_tools(github, result_container)
+
+            async with AzureAIClient(
+                project_endpoint=endpoint,
+                model_deployment_name=model,
+                credential=credential,
+            ).as_agent(
+                name="fix-applier",
+                instructions=apply_instructions,
+                tools=apply_tools,
+            ) as phase2_agent:
+
+                phase2_runner = from_agent_framework(phase2_agent)
+                phase2_result = await _run_phase(
+                    phase2_runner,
+                    "Phase 2 (apply)",
+                    PHASE2_TIMEOUT,
+                )
+
+            if result_container:
+                final_result = result_container[0]
+                logger.info("Phase 2 succeeded — result captured.")
+                break
+
+            logger.warning(
+                "Phase 2 produced no result (attempt %d). Runner result=%r",
+                attempt,
+                phase2_result,
+            )
+            if attempt > MAX_RETRIES:
+                logger.error("Phase 2 failed after all retries.")
+                break
 
     finally:
         await github.close()
         await credential.close()
+
+    logger.info(
+        "FINAL RESPONSE:\n%s\n%s\n%s", "=" * 44, final_result, "=" * 44
+    )
 
 
 if __name__ == "__main__":

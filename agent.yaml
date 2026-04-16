@@ -30,6 +30,10 @@ environment_variables:
     value: ${GITHUB_REPO_OWNER}
   - name: GITHUB_REPO_NAME
     value: ${GITHUB_REPO_NAME}
+  - name: PHASE1_TIMEOUT_SECONDS
+    value: ${PHASE1_TIMEOUT_SECONDS:-120}
+  - name: PHASE2_TIMEOUT_SECONDS
+    value: ${PHASE2_TIMEOUT_SECONDS:-180}
   - name: LOG_LEVEL
     value: ${LOG_LEVEL:-INFO}
 resources:

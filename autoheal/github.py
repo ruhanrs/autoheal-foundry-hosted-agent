@@ -19,11 +19,6 @@ logger = logging.getLogger(__name__)
 
 _BASE = "https://api.github.com"
 
-# These MUST be set via environment variables — no hardcoded defaults.
-# Raises KeyError at startup if missing; fail-fast is intentional.
-_OWNER: str = os.environ["GITHUB_REPO_OWNER"]
-_REPO: str = os.environ["GITHUB_REPO_NAME"]
-
 # JWT lifetime constants
 _JWT_ISSUED_AT_SKEW = 60       # seconds in the past (clock-skew buffer)
 _JWT_MAX_LIFETIME = 10 * 60    # 10 minutes (GitHub's maximum)
@@ -116,6 +111,8 @@ class GitHubClient:
         self._app_id = app_id or os.environ["GITHUB_APP_ID"]
         self._installation_id = installation_id or os.environ["GITHUB_APP_INSTALLATION_ID"]
         self._private_key = private_key or _load_private_key()
+        self._owner = os.environ["GITHUB_REPO_OWNER"]
+        self._repo = os.environ["GITHUB_REPO_NAME"]
         self._token: str | None = None
         self._token_expires_at: float = 0
         self._client = httpx.AsyncClient(
@@ -156,7 +153,7 @@ class GitHubClient:
     # ── helpers ────────────────────────────────────────────────────────
 
     def _url(self, path: str) -> str:
-        return f"/repos/{_OWNER}/{_REPO}{path}"
+        return f"/repos/{self._owner}/{self._repo}{path}"
 
     async def _request(
         self, method: str, url: str, *, correlation_id: str | None = None, **kwargs
@@ -278,6 +275,15 @@ class GitHubClient:
         if sha:
             body["sha"] = sha
         resp = await self._request("PUT", self._url(f"/contents/{path}"), json=body)
+        if resp.status_code in {409, 422} and sha:
+            logger.warning(
+                "Initial update for '%s' on '%s' conflicted; refreshing SHA and retrying once.",
+                path,
+                branch,
+            )
+            latest = await self.get_file_contents(path, branch)
+            body["sha"] = latest.sha
+            resp = await self._request("PUT", self._url(f"/contents/{path}"), json=body)
         self._raise(resp)
         return resp.json()["content"]["sha"]
 
@@ -288,7 +294,7 @@ class GitHubClient:
     ) -> list[PullRequest]:
         params: dict = {"state": state, "per_page": "30"}
         if head:
-            params["head"] = f"{_OWNER}:{head}"
+            params["head"] = f"{self._owner}:{head}"
         resp = await self._request("GET", self._url("/pulls"), params=params)
         self._raise(resp)
         return [
