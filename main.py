@@ -41,21 +41,8 @@ def _configure_logging() -> None:
                 "stream": "ext://sys.stdout",
                 "formatter": "standard",
             },
-            "stderr": {
-                "class": "logging.StreamHandler",
-                "stream": "ext://sys.stderr",
-                "formatter": "standard",
-                "level": "ERROR",
-            },
         },
-        "root": {
-            "level": log_level,
-            "handlers": ["stdout"],
-        },
-        "loggers": {
-            "autoheal": {"level": log_level, "propagate": True},
-            "__main__": {"level": log_level, "propagate": True},
-        },
+        "root": {"level": log_level, "handlers": ["stdout"]},
     })
 
 _configure_logging()
@@ -73,7 +60,6 @@ _REQUIRED_ENV_VARS = [
 ]
 
 def _validate_env() -> None:
-    """Fail fast at startup if any required variable is missing."""
     missing = [v for v in _REQUIRED_ENV_VARS if not os.environ.get(v)]
     if missing:
         logger.error("Missing required environment variables: %s", ", ".join(missing))
@@ -87,13 +73,10 @@ MAX_RETRIES = int(os.getenv("AGENT_MAX_RETRIES", "2"))
 
 # ── Graceful shutdown ──────────────────────────────────────────────────────────
 
-_shutdown_event = asyncio.Event()
-
 def _install_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
-    """Register SIGTERM and SIGINT handlers for graceful shutdown."""
     def _handle(sig: signal.Signals) -> None:
-        logger.info("Received signal %s — initiating graceful shutdown.", sig.name)
-        loop.call_soon_threadsafe(_shutdown_event.set)
+        logger.info("Received %s — shutting down.", sig.name)
+        loop.stop()
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, _handle, sig)
@@ -101,47 +84,56 @@ def _install_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
 # ── Agent execution ────────────────────────────────────────────────────────────
 
 async def run_agent_once(runner) -> str | None:
-    """Run agent once with timeout protection."""
     start = time.monotonic()
     try:
         logger.info("Starting agent execution (timeout=%ds).", AGENT_TIMEOUT_SECONDS)
-        result = await asyncio.wait_for(
-            runner.run_async(),
-            timeout=AGENT_TIMEOUT_SECONDS,
-        )
-        elapsed = round(time.monotonic() - start, 2)
-        logger.info("Agent completed in %.2fs.", elapsed)
+        result = await asyncio.wait_for(runner.run_async(), timeout=AGENT_TIMEOUT_SECONDS)
+        logger.info("Agent completed in %.2fs.", time.monotonic() - start)
         return result
     except asyncio.TimeoutError:
-        elapsed = round(time.monotonic() - start, 2)
-        logger.error("Agent timed out after %.2fs (limit=%ds).", elapsed, AGENT_TIMEOUT_SECONDS)
+        logger.error("Agent timed out after %.2fs.", time.monotonic() - start)
         return None
     except Exception:
         logger.exception("Agent execution raised an unexpected exception.")
         return None
 
 
-def validate_result(result: str | None) -> str:
-    """Ensure agent returns a valid final response."""
-    if not result:
-        return "Automatic fix could not be safely determined."
+def _extract_result(run_result: str | None, result_container: list) -> str:
+    """
+    Return the best available result, checking sources in priority order:
 
-    result_str = str(result).strip()
-    if not result_str:
-        return "Automatic fix could not be safely determined."
+    1. result_container  — populated when the model called report_final_result
+       (works even when run_async() returns no text, which is a known limitation
+       of azure-ai-agentserver-agentframework 1.0.0b16 where the SDK only
+       executes one model turn without feeding tool results back for continuation)
+    2. run_result text   — standard path when the SDK does return text
+    3. Fallback message  — nothing worked
+    """
+    # Priority 1: captured via report_final_result tool call
+    if result_container:
+        captured = result_container[0]
+        logger.info("Using result captured from report_final_result tool call.")
+        return captured
 
-    if "Root Cause:" not in result_str:
-        logger.warning("Agent output missing required 'Root Cause:' block. Treating as invalid.")
-        return "Automatic fix could not be safely determined."
+    # Priority 2: text returned directly from run_async()
+    if run_result:
+        text = str(run_result).strip()
+        if text and "Root Cause:" in text:
+            logger.info("Using text result returned by run_async().")
+            return text
+        logger.warning("run_async() returned text but it lacks 'Root Cause:' — treating as invalid.")
 
-    return result_str
+    return "Automatic fix could not be safely determined."
 
 
 async def main() -> None:
     _validate_env()
 
+    # Shared capture cell — report_final_result writes here, _extract_result reads here.
+    result_container: list[str] = []
+
     github = GitHubClient()
-    tools = create_tools(github)
+    tools = create_tools(github, result_container)
     credential = DefaultAzureCredential()
 
     try:
@@ -162,22 +154,25 @@ async def main() -> None:
 
             while attempt <= MAX_RETRIES:
                 attempt += 1
+                result_container.clear()   # reset capture cell for each attempt
                 logger.info("Agent attempt %d/%d", attempt, MAX_RETRIES + 1)
 
-                result = await run_agent_once(runner)
-                validated = validate_result(result)
+                run_result = await run_agent_once(runner)
+                candidate = _extract_result(run_result, result_container)
 
-                if validated != "Automatic fix could not be safely determined.":
-                    final_result = validated
+                if candidate != "Automatic fix could not be safely determined.":
+                    final_result = candidate
                     break
 
                 if attempt <= MAX_RETRIES:
-                    logger.warning("Invalid result on attempt %d. Retrying...", attempt)
+                    logger.warning("No valid result on attempt %d — retrying.", attempt)
 
             if not final_result:
                 final_result = "Automatic fix could not be safely determined."
 
-            logger.info("FINAL RESPONSE:\n%s\n%s\n%s", "=" * 44, final_result, "=" * 44)
+            logger.info(
+                "FINAL RESPONSE:\n%s\n%s\n%s", "=" * 44, final_result, "=" * 44
+            )
 
     finally:
         await github.close()

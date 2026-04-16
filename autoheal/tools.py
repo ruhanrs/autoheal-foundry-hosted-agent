@@ -44,8 +44,15 @@ def _validate_path(path: str) -> str | None:
     return None
 
 
-def create_tools(github: GitHubClient) -> list:
-    """Create tool functions bound to the given GitHubClient instance."""
+def create_tools(github: GitHubClient, result_container: list) -> list:
+    """
+    Create tool functions bound to the given GitHubClient instance.
+
+    result_container is a single-element list used as a mutable capture cell.
+    When the agent calls report_final_result, the formatted output block is
+    stored in result_container[0] so main.py can retrieve it even when the
+    hosted-agent framework returns no text from run_async().
+    """
 
     # ── Branch operations ─────────────────────────────────────────────
 
@@ -53,7 +60,7 @@ def create_tools(github: GitHubClient) -> list:
     async def verify_branch_exists(
         branch: Annotated[str, "Branch name to check"],
     ) -> str:
-        """Verify that a branch exists in the repository. Returns confirmation or 'not_found'. Always call this before creating an auto-heal branch to confirm the source branch is real."""
+        """Verify that a branch exists in the repository. Returns confirmation or 'not_found'."""
         err = _validate_branch(branch)
         if err:
             return f"ERROR: {err}"
@@ -68,7 +75,7 @@ def create_tools(github: GitHubClient) -> list:
         new_branch: Annotated[str, "Name for the new branch"],
         from_branch: Annotated[str, "Source branch to create from"],
     ) -> str:
-        """Create a new branch from a source branch. Returns the SHA of the new branch head. The source branch MUST be verified with verify_branch_exists first."""
+        """Create a new branch from a source branch. Returns the SHA of the new branch head."""
         for name in (new_branch, from_branch):
             err = _validate_branch(name)
             if err:
@@ -92,7 +99,7 @@ def create_tools(github: GitHubClient) -> list:
         path: Annotated[str, "File path in the repository (no leading slash)"],
         ref: Annotated[str, "Branch or commit ref to read from"],
     ) -> str:
-        """Read a file from the repository at a specific branch ref. Returns the file content and its SHA (needed for updates). Use the auto-heal branch ref if it exists, otherwise the source branch."""
+        """Read a file from the repository at a specific branch ref. Returns content and SHA (needed for updates)."""
         path_err = _validate_path(path)
         if path_err:
             return f"ERROR: {path_err}"
@@ -127,9 +134,9 @@ def create_tools(github: GitHubClient) -> list:
         content: Annotated[str, "Complete plain-text file content — never Base64"],
         commit_message: Annotated[str, "Git commit message"],
         branch: Annotated[str, "Branch to commit to"],
-        sha: Annotated[str, "File SHA from get_file_contents (required for updates, empty string for new files)"] = "",
+        sha: Annotated[str, "File SHA from get_file_contents (empty string for brand-new files)"] = "",
     ) -> str:
-        """Create or update a file on a branch. Requires the file SHA from get_file_contents for updates (to prevent conflicts). For new files, omit the sha parameter. Content must be plain text in the original file format."""
+        """Create or update a file on a branch. For updates, sha must be the value returned by get_file_contents."""
         path_err = _validate_path(path)
         if path_err:
             return f"ERROR: {path_err}"
@@ -161,9 +168,9 @@ def create_tools(github: GitHubClient) -> list:
 
     @tool
     async def list_pull_requests(
-        head_branch: Annotated[str, "Filter by head branch name (optional, pass empty string to list all)"] = "",
+        head_branch: Annotated[str, "Filter by head branch name (pass empty string to list all)"] = "",
     ) -> str:
-        """List open pull requests. Optionally filter by head branch name. Use this to check for an existing auto-heal PR before creating one."""
+        """List open pull requests, optionally filtered by head branch."""
         head: str | None = None
         if head_branch:
             err = _validate_branch(head_branch)
@@ -192,7 +199,7 @@ def create_tools(github: GitHubClient) -> list:
         head_branch: Annotated[str, "Source branch (auto-heal branch)"],
         base_branch: Annotated[str, "Target branch to merge into"],
     ) -> str:
-        """Create a new pull request. Returns the PR number and URL. Only call this if list_pull_requests found no existing auto-heal PR."""
+        """Create a new pull request. Only call this when no existing auto-heal PR was found."""
         for name, label in ((head_branch, "head_branch"), (base_branch, "base_branch")):
             err = _validate_branch(name)
             if err:
@@ -220,7 +227,7 @@ def create_tools(github: GitHubClient) -> list:
     async def get_pull_request(
         pr_number: Annotated[int, "Pull request number"],
     ) -> str:
-        """Get details of an existing pull request by number. Use to verify a PR exists and get its current URL/state."""
+        """Get details of an existing pull request by number."""
         if not isinstance(pr_number, int) or pr_number <= 0:
             return "ERROR: pr_number must be a positive integer."
         logger.debug("get_pull_request: #%d", pr_number)
@@ -236,6 +243,42 @@ def create_tools(github: GitHubClient) -> list:
             f"State: {pr.state}"
         )
 
+    # ── Result capture ────────────────────────────────────────────────
+    # This tool is the MANDATORY last step in every successful run.
+    # It writes the structured result into result_container so main.py
+    # can retrieve it even if the hosted-agent framework never returns
+    # a text message from run_async() (known SDK limitation in 1.0.0b16).
+
+    @tool
+    async def report_final_result(
+        root_cause: Annotated[str, "One-line summary of the root cause of the build failure"],
+        fix_applied: Annotated[str, "What was changed in the file(s) and why it fixes the error"],
+        files_modified: Annotated[str, "Comma-separated list of repository file paths that were changed"],
+        branch: Annotated[str, "The auto-heal branch name that was created or reused"],
+        pull_request_url: Annotated[str, "The full PR URL returned by create_pull_request or list_pull_requests"],
+        build_id: Annotated[str, "The Build ID from the input prompt"],
+    ) -> str:
+        """
+        MANDATORY FINAL STEP — call this tool after all fixes are committed and the PR exists.
+        Do NOT call this before create_or_update_file and create_pull_request are complete.
+        This records the structured result so the platform can capture it.
+        """
+        output = (
+            f"Root Cause: {root_cause}\n"
+            f"Fix Applied: {fix_applied}\n"
+            f"Files Modified: {files_modified}\n"
+            f"Branch: {branch}\n"
+            f"Pull Request: {pull_request_url}\n"
+            f"Build ID: {build_id}"
+        )
+        result_container.clear()
+        result_container.append(output)
+        logger.info("report_final_result captured:\n%s", output)
+        return (
+            "Result recorded. Workflow complete.\n\n"
+            f"{output}"
+        )
+
     return [
         verify_branch_exists,
         create_branch,
@@ -244,4 +287,5 @@ def create_tools(github: GitHubClient) -> list:
         list_pull_requests,
         create_pull_request,
         get_pull_request,
+        report_final_result,
     ]
