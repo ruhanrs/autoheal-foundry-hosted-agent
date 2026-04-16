@@ -1,0 +1,38 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/microsoft/AgentSchema/refs/heads/main/schemas/v1.0/ContainerAgent.yaml
+# dockerfile_path: Dockerfile
+
+kind: hosted
+name: foundrycicdagent
+description: >
+  CI/CD auto-healing agent that diagnoses pipeline failures and creates
+  fix PRs on GitHub using the repository's code conventions.
+metadata:
+  authors:
+    - Microsoft
+  tags:
+    - Azure AI AgentServer
+    - Microsoft Agent Framework
+protocols:
+  - protocol: responses
+    version: v1
+environment_variables:
+  - name: FOUNDRY_PROJECT_ENDPOINT
+    value: ${FOUNDRY_PROJECT_ENDPOINT}
+  - name: FOUNDRY_MODEL_DEPLOYMENT_NAME
+    value: ${FOUNDRY_MODEL_DEPLOYMENT_NAME}
+  - name: GITHUB_APP_ID
+    value: ${GITHUB_APP_ID}
+  - name: GITHUB_APP_INSTALLATION_ID
+    value: ${GITHUB_APP_INSTALLATION_ID}
+  - name: GITHUB_APP_PRIVATE_KEY
+    value: ${GITHUB_APP_PRIVATE_KEY}
+  - name: GITHUB_REPO_OWNER
+    value: ${GITHUB_REPO_OWNER}
+  - name: GITHUB_REPO_NAME
+    value: ${GITHUB_REPO_NAME}
+  - name: LOG_LEVEL
+    value: ${LOG_LEVEL:-INFO}
+resources:
+  cpu: '1.0'
+  memory: 2.0Gi
+dockerfile_path: Dockerfile
