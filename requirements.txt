@@ -1,20 +1,6 @@
-# Azure AI AgentServer / Agent Framework (pinned — beta, breaking changes expected between releases)
-agent-framework-azure-ai==1.0.0rc3
-agent-framework-core==1.0.0rc3
-azure-ai-agentserver-agentframework==1.0.0b17
-azure-ai-agentserver-core==1.0.0b17
-
-# Azure Identity — upper-bound at major version to prevent breaking changes
-azure-identity>=1.16.0,<2.0.0
-
-# HTTP client — cap at 1.0 (0.x series is stable API)
-httpx>=0.27.0,<1.0.0
-
-# JWT signing — PyJWT 3.x removed some APIs; stay on 2.x
-PyJWT[crypto]>=2.8.0,<3.0.0
-
-# .env loading — 1.x is stable
-python-dotenv>=1.0.0,<2.0.0
-
-# MCP client SDK for true MCP-based GitHub operations
-mcp>=1.0.0,<2.0.0
+azure-ai-agentserver-agentframework==1.0.0b16
+httpx>=0.27
+python-dotenv>=1.0
+debugpy
+# Agent development CLI tool (preview)
+agent-dev-cli

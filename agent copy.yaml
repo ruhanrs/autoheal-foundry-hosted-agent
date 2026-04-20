@@ -32,7 +32,7 @@ environment_variables:
     value: ${GITHUB_REPO_NAME}
   - name: LOG_LEVEL
     value: ${LOG_LEVEL}
-dockerfile_path: Dockerfile
+dockerfile_path: ./Dockerfile
 resources:
-  cpu: '1.0'
-  memory: 2.0Gi
+  cpu: '0.5'
+  memory: 1.0Gi

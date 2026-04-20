@@ -1,49 +1,66 @@
-# Version control
-.git
-.gitignore
-
-# Secrets — never bake into the image
-.env
-.env.*
-*.pem
-*.key
-*.p12
-*.pfx
-
-# Python caches
-__pycache__
-*.pyc
-*.pyo
-*.pyd
-.Python
-*.egg-info/
-dist/
-build/
-.eggs/
-
 # Virtual environments
 .venv/
 venv/
 env/
-.virtualenv/
+.python-version
 
-# IDE and OS noise
-.vscode/
-.idea/
-*.swp
-*.swo
-.DS_Store
-Thumbs.db
+# Environment files with secrets
+.env
+.env.*
+*.local
 
-# Tests and dev tooling
-tests/
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Testing
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
 .pytest_cache/
 .mypy_cache/
-.ruff_cache/
-htmlcov/
-.coverage
-coverage.xml
 
-# Docs (not needed at runtime)
-*.md
+# IDE and OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Foundry config
+.foundry/
+build-source-*/
+
+# Git
+.git/
+.gitignore
+
+# Docker
+.dockerignore
+
+# Documentation
 docs/
+*.md
+!README.md
+LICENSE
