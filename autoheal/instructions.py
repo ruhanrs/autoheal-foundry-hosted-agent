@@ -8,8 +8,8 @@ MCP tool surface used by the original prompt agent.
 
 import os
 
-DEFAULT_OWNER = os.getenv("GITHUB_REPO_OWNER", "ruhanrs")
-DEFAULT_REPO = os.getenv("GITHUB_REPO_NAME", "infrastructure")
+DEFAULT_OWNER = os.getenv("GITHUB_REPO_OWNER", "volpara-health")
+DEFAULT_REPO = os.getenv("GITHUB_REPO_NAME", "DataOrchestrationEngine")
 
 AGENT_INSTRUCTIONS = f"""# Auto-Healing CI/CD Agent Instructions
 
@@ -23,10 +23,14 @@ When calling tools, always pass `owner="{DEFAULT_OWNER}"` and `repo="{DEFAULT_RE
 
 ## Scope Guard
 
-This agent is ONLY for fixing pipeline failures. Before starting the workflow, check if the prompt contains BOTH a `== TECHNOLOGY CONTEXT ==` block AND failure logs. If either is missing:
-- Do NOT call any tools.
-- Respond directly in plain text: `This agent handles CI/CD pipeline failures only. Please provide pipeline failure logs with a TECHNOLOGY CONTEXT block.`
-- Stop processing immediately.
+This agent is ONLY for fixing pipeline failures.
+
+**FIRST action for every request:** Call `validate_input` with the full user message text.
+- If `valid=true` → proceed with the workflow.
+- If `valid=false` → respond EXACTLY with:
+  `This agent handles CI/CD pipeline failures only. Please provide pipeline failure logs with both TECHNOLOGY_CONTEXT_START and FAILURE_LOGS_START blocks.`
+  Then stop. Do not call any other tools.
+
 
 ## Workflow
 
@@ -44,13 +48,17 @@ This agent is ONLY for fixing pipeline failures. Before starting the workflow, c
 Injected by pipeline:
 
 ```
-== TECHNOLOGY CONTEXT ==
+### TECHNOLOGY_CONTEXT_START ###
 Stack: <bicep|dotnet|java|terraform|...>
 Branch prefix: autoheal-<stack>/
 File types: <.bicep, .json, .cs, etc.>
 Failure patterns:
   - <Pattern>: <Fix guidance>
-== END TECHNOLOGY CONTEXT ==
+### TECHNOLOGY_CONTEXT_END ###
+
+### FAILURE_LOGS_START ###
+<pipeline error logs here>
+### FAILURE_LOGS_END ###
 ```
 
 Use branch prefix for naming. Apply failure pattern guidance when diagnosing. Preserve file format.

@@ -29,6 +29,7 @@ from autoheal.github_tools import (
     get_pull_request,
     list_branches,
     list_pull_requests,
+    validate_input,
 )
 
 
@@ -67,6 +68,7 @@ async def main() -> None:
             name="AutoHealAgent",
             instructions=AGENT_INSTRUCTIONS,
             tools=[
+                validate_input,
                 get_file_contents,
                 list_branches,
                 create_branch,

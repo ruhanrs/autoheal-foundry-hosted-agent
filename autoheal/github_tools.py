@@ -15,6 +15,7 @@ import base64
 import json
 import logging
 import os
+import re
 from typing import Annotated, Any
 
 import httpx
@@ -320,5 +321,53 @@ def get_pull_request(
             "base": (resp.get("base") or {}).get("ref"),
             "merged": resp.get("merged"),
             "mergeable": resp.get("mergeable"),
+        }
+    )
+
+
+def validate_input(
+    input_text: Annotated[str, "The full user input/prompt text to validate."],
+) -> str:
+    """Validate that the input contains the required CI/CD pipeline blocks.
+
+    ALWAYS call this tool FIRST before any other tool. It checks deterministically
+    (via string search, not LLM reasoning) whether the payload includes both a
+    TECHNOLOGY_CONTEXT_START block and a FAILURE_LOGS_START block.
+
+    Returns a JSON object with:
+      - valid (bool): True if both required blocks are present.
+      - missing (list): Names of missing blocks (empty when valid=True).
+      - stack (str|null): Detected stack value from TECHNOLOGY CONTEXT block.
+      - source_branch (str|null): Detected source branch from the input.
+    """
+    has_tech = "TECHNOLOGY_CONTEXT_START" in input_text
+    has_logs = "FAILURE_LOGS_START" in input_text
+
+    missing = []
+    if not has_tech:
+        missing.append("TECHNOLOGY_CONTEXT_START")
+    if not has_logs:
+        missing.append("FAILURE_LOGS_START")
+
+    stack = None
+    source_branch = None
+
+    if has_tech:
+        stack_match = re.search(r"Stack:\s*(\S+)", input_text)
+        if stack_match:
+            stack = stack_match.group(1).strip().lower()
+
+    branch_match = re.search(
+        r"(?:Pipeline Source Branch|Source Branch|Branch):\s*(\S+)", input_text, re.IGNORECASE
+    )
+    if branch_match:
+        source_branch = branch_match.group(1).strip()
+
+    return _ok(
+        {
+            "valid": len(missing) == 0,
+            "missing": missing,
+            "stack": stack,
+            "source_branch": source_branch,
         }
     )
